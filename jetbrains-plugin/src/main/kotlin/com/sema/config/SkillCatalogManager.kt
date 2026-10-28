@@ -14,7 +14,7 @@ import java.net.URLEncoder
 import java.nio.file.Files
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipInputStream
 
 /**
@@ -24,7 +24,8 @@ import java.util.zip.ZipInputStream
  *   - 本地目录形式 <id>/（含 SKILL.md，可选 card.json）：安装 = 按清单逐个拷贝
  *   - 远程配置形式 <id>.json（card + source）：安装 = 从 GitHub 拉 zip 包取子目录
  *   - 安装目标：用户级 ~/.sema/skills/<id> 或项目级 <project>/.sema/skills/<id>；同名目录存在即视为已安装
- *   - card.defaultInstall 的技能首次打开工具窗口时自动装到用户级，已处理 id 持久化（用户卸载后不再重装）
+ *   - card.defaultInstall 的技能首次打开工具窗口时自动装到用户级，已处理 id 持久化（用户卸载后不再重装）；
+ *     升级后首次打开按插件资源覆盖用户级已有目录（见 syncDefaultSkills，由 BuiltinResourcesSync 调度）
  */
 @Service(Service.Level.APP)
 class SkillCatalogManager {
@@ -33,7 +34,6 @@ class SkillCatalogManager {
     private val props = PropertiesComponent.getInstance()
     /** 进行中的 zip 下载：同仓库同 ref 的并行安装共享一次下载 */
     private val inflightZips = ConcurrentHashMap<String, CompletableFuture<ByteArray>>()
-    private val defaultInstallStarted = AtomicBoolean(false)
 
     companion object {
         private const val ASSETS_DIR = "assets/skills"
@@ -286,27 +286,33 @@ class SkillCatalogManager {
     }
 
     /**
-     * 默认安装（每个 IDE 进程只跑一次，调用方放池线程）：card.defaultInstall 的技能里挑出未处理过的，装到用户级。
-     * 用户级已有同名目录视为已处理（不覆盖）；下载失败的不计入，下次启动重试。处理完的 id 持久化（用户之后卸载也不再重装）。
+     * 默认安装 / 升级同步（由 BuiltinResourcesSync 在池线程调用，对齐 VSCode SkillCatalogManager.syncDefaultSkills）：card.defaultInstall 的技能。
+     *   - 未处理过的 id：用户级没有同名目录就装（有则视为已处理，不覆盖）；下载失败的不计入，下次启动重试。
+     *   - upgraded（升级后首次打开）：用户级已有目录的一律按插件资源覆盖（用户卸载过的不重装）。
+     * 处理完的新 id 持久化（用户之后卸载也不再重装）；返回失败个数，升级同步有失败则调用方不落版本号。
      */
-    fun installDefaultSkillsOnce() {
-        if (!defaultInstallStarted.compareAndSet(false, true)) return
+    fun syncDefaultSkills(upgraded: Boolean): Int {
         val handled: List<String> = props.getValue(DEFAULT_SKILLS_INSTALLED_KEY)?.let {
             runCatching { gson.fromJson<List<String>>(it, object : TypeToken<List<String>>() {}.type) }.getOrNull()
         } ?: emptyList()
-        val pending = resources.filter { it.card.defaultInstall == true && it.id !in handled }
-        if (pending.isEmpty()) return
-        val done = pending.map { r ->
+        val all = resources.filter { it.card.defaultInstall == true }
+        val failed = AtomicInteger(0)
+        val done = all.map { r ->
             CompletableFuture.supplyAsync {
+                val exists = skillDir("user", r.id, null).exists()
+                val isNew = r.id !in handled
                 try {
-                    if (!skillDir("user", r.id, null).exists()) install(r.id, "user", false, null)
-                    r.id
+                    if (isNew && !exists) install(r.id, "user", false, null)
+                    else if (upgraded && exists) install(r.id, "user", true, null)
+                    if (isNew) r.id else null
                 } catch (e: Exception) {
-                    log.warn("[skill-catalog] default skill ${r.id} install failed: ${e.message}")
+                    failed.incrementAndGet()
+                    log.warn("[skill-catalog] default skill ${r.id} ${if (exists) "upgrade" else "install"} failed: ${e.message}")
                     null
                 }
             }
         }.mapNotNull { it.join() }
         if (done.isNotEmpty()) props.setValue(DEFAULT_SKILLS_INSTALLED_KEY, gson.toJson((handled + done).distinct()))
+        return failed.get()
     }
 }

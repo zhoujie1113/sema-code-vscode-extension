@@ -386,6 +386,11 @@ export class SemaSidebarProvider implements vscode.WebviewViewProvider {
         return this.sessions.get(sessionId);
     }
 
+    /** 宿主侧直接调 core 的入口（扩展激活时的内置资源升级同步用） */
+    public getProcessWrapper(): SemaProcessWrapper {
+        return this.processWrapper;
+    }
+
     public getActiveSessionId(): string | null {
         return this.activeSessionId;
     }

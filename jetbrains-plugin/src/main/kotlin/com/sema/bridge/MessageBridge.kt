@@ -7,6 +7,7 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.sema.config.BuiltinResourcesSync
 import com.sema.config.SemaBundle
 import com.sema.config.SemaConfigVirtualFile
 import com.sema.config.SessionHistoryManager
@@ -27,12 +28,6 @@ import semacore.transport.SemaEvent
  */
 /** 面板类型：让桥区分自己承载的是哪个 webview（当前仅用于配置页的就绪信号）。 */
 enum class PanelKind { CHAT, CONFIG, HISTORY, OTHER }
-
-// 浏览器控制资产（由 build.gradle.kts 的 syncChromeAssets 从主工程 assets/chrome 同步进插件资源）
-private const val BROWSER_ASSETS_DIR = "assets/chrome"
-private const val BROWSER_SKILL_NAME = "chrome-use"
-private const val BROWSER_MCP_NAME = "chrome"
-private val BROWSER_SKILL_FILES = listOf("SKILL.md")
 
 /** 使用统计的产品标识：init 传给 core 即启用采集；配置页读取时按同名常量过滤（config-controller.ts USAGE_PRODUCT，两处须一致）。 */
 private const val USAGE_PRODUCT = "sema-code-jetbrains"
@@ -175,32 +170,26 @@ class MessageBridge(
 
     /** 破坏性操作确认弹窗（channel=editor, type=confirm；带 reqId 回帧供 callEditor resolve）。对齐 VSCode configWebview.confirm 的 modal 警告。 */
     /**
-     * 浏览器控制的宿主侧准备（webview 无 fs，此两步下沉到 Kotlin；其余 skill 刷新 / MCP 增删走 gRPC，见 config-controller）：
-     * op=prepare → 用户级 chrome-use skill 目录缺失时从插件资源拷贝；读取 mcp.json 模板，回传 chrome 项。
-     * 资源在 jar 内无法列目录，skill 文件按已知清单逐个拷贝：assets/chrome/skills/chrome-use 新增文件时需同步更新 BROWSER_SKILL_FILES。
+     * 浏览器控制的宿主侧准备（webview 无 fs，拷目录 / 读模板下沉到 Kotlin，见 BuiltinResourcesSync；其余 skill 刷新 / MCP 增删走 gRPC）：
+     * op=prepare → 开启开关：用户级 chrome-use skill 目录缺失时从插件资源拷贝；回传 mcp.json 模板的 chrome 项（config-controller）。
+     * op=syncUpgrade → 聊天页 core 就绪：升级后首次且开关开着时重拷已有的 chrome-use 目录，回传 sync=true 与模板，网页侧继续重写 MCP。
+     * op=markSynced → 网页侧 MCP 重写成功：落内置资源版本号。
      */
     private fun handleBrowserControl(obj: JsonObject) {
         val reqId = obj.str("reqId")
         val payload = runCatching { gson.fromJson(obj.str("payload"), JsonObject::class.java) }.getOrNull() ?: JsonObject()
+        val sync = BuiltinResourcesSync.instance()
         try {
             when (payload.str("op")) {
                 "prepare" -> {
-                    val skillDir = java.io.File(System.getProperty("user.home"), ".sema/skills/$BROWSER_SKILL_NAME")
-                    if (!java.io.File(skillDir, "SKILL.md").exists()) {
-                        skillDir.mkdirs()
-                        for (name in BROWSER_SKILL_FILES) {
-                            val bytes = readResource("$BROWSER_ASSETS_DIR/skills/$BROWSER_SKILL_NAME/$name")
-                                ?: throw IllegalStateException("插件资源缺少 $BROWSER_ASSETS_DIR/skills/$BROWSER_SKILL_NAME/$name")
-                            java.io.File(skillDir, name).writeBytes(bytes)
-                        }
-                    }
-                    val template = readResource("$BROWSER_ASSETS_DIR/mcp.json")?.toString(Charsets.UTF_8)
-                        ?: throw IllegalStateException("插件资源缺少 $BROWSER_ASSETS_DIR/mcp.json")
-                    val entry = gson.fromJson(template, JsonObject::class.java)
-                        ?.getAsJsonObject("mcpServers")?.getAsJsonObject(BROWSER_MCP_NAME)
-                        ?: throw IllegalStateException("$BROWSER_ASSETS_DIR/mcp.json 缺少 mcpServers.$BROWSER_MCP_NAME")
-                    replyEditor(reqId, mapOf("mcp" to toMap(entry)))
+                    if (!java.io.File(sync.userBrowserSkillDir, "SKILL.md").exists()) sync.copyBrowserSkill()
+                    replyEditor(reqId, mapOf("mcp" to toMap(sync.browserMcpTemplate())))
                 }
+                "syncUpgrade" -> {
+                    val need = sync.prepareUpgradeSync()
+                    replyEditor(reqId, if (need) mapOf("sync" to true, "mcp" to toMap(sync.browserMcpTemplate())) else mapOf("sync" to false))
+                }
+                "markSynced" -> { sync.markSynced(); replyEditor(reqId, mapOf("ok" to true)) }
                 else -> replyEditorError(reqId, "未知 browserControl op: ${payload.str("op")}")
             }
         } catch (e: Exception) {
@@ -293,9 +282,6 @@ class MessageBridge(
     private fun refreshVfs(file: java.io.File) {
         runCatching { LocalFileSystem.getInstance().refreshIoFiles(listOf(file), true, true, null) }
     }
-
-    private fun readResource(path: String): ByteArray? =
-        MessageBridge::class.java.classLoader.getResourceAsStream(path)?.use { it.readBytes() }
 
     private fun handleConfirm(obj: JsonObject) {
         val reqId = obj.str("reqId")

@@ -3,7 +3,8 @@
  *   - 本地目录形式 resources/skills/<id>/（含 SKILL.md，可选 card.json）：安装 = 整目录复制
  *   - 远程配置形式 resources/skills/<id>.json（card + source）：安装 = 从 GitHub 拉 zip 包取子目录
  *   - 安装目标：用户级 ~/.sema/skills/<id> 或项目级 <workspace>/.sema/skills/<id>；同名目录存在即视为已安装
- *   - card.defaultInstall 的技能在扩展激活时自动装到用户级，已处理 id 由调用方持久化（用户卸载后不再重装）
+ *   - card.defaultInstall 的技能在扩展激活时自动装到用户级，已处理 id 由调用方持久化（用户卸载后不再重装）；
+ *     升级后首次激活按安装包覆盖用户级已有目录（见 syncDefaultSkills）
  */
 import * as fs from 'fs';
 import * as os from 'os';
@@ -218,21 +219,28 @@ export class SkillCatalogManager {
     }
 
     /**
-     * 默认安装：card.defaultInstall 的技能里挑出未处理过的，装到用户级。
-     * 用户级已有同名目录视为已处理（不覆盖）；下载失败的不计入，下次激活重试。
-     * 返回本轮处理完的 id，由调用方持久化（用户之后卸载也不再重装）。
+     * 默认安装 / 升级同步：card.defaultInstall 的技能（对齐 webui ecosystem.syncDefaultSkills）。
+     *   - 未处理过的 id：用户级没有同名目录就装（有则视为已处理，不覆盖）；下载失败的不计入，下次激活重试。
+     *   - upgraded（升级后首次激活）：用户级已有目录的一律按安装包覆盖（用户卸载过的不重装）。
+     * 返回 handled = 本轮处理完的新 id（调用方持久化，用户之后卸载也不再重装），
+     * failed = 失败个数（升级同步有失败则调用方不落版本号，下次激活重试）。
      */
-    async installDefaultSkills(handled: string[]): Promise<string[]> {
-        const pending = this.scan().filter(r => !!r.card.defaultInstall && !handled.includes(r.id));
-        const done = await Promise.all(pending.map(async r => {
+    async syncDefaultSkills(handled: string[], upgraded: boolean): Promise<{ handled: string[]; failed: number }> {
+        const all = this.scan().filter(r => !!r.card.defaultInstall);
+        let failed = 0;
+        const done = await Promise.all(all.map(async r => {
+            const exists = fs.existsSync(this.skillDir('user', r.id));
+            const isNew = !handled.includes(r.id);
             try {
-                if (!fs.existsSync(this.skillDir('user', r.id))) await this.install(r.id, 'user', false);
-                return r.id;
+                if (isNew && !exists) await this.install(r.id, 'user', false);
+                else if (upgraded && exists) await this.install(r.id, 'user', true);
+                return isNew ? r.id : null;
             } catch (e) {
-                console.error(`[skill-catalog] default skill ${r.id} install failed:`, (e as Error)?.message || e);
+                failed++;
+                console.error(`[skill-catalog] default skill ${r.id} ${exists ? 'upgrade' : 'install'} failed:`, (e as Error)?.message || e);
                 return null;
             }
         }));
-        return done.filter((x): x is string => !!x);
+        return { handled: done.filter((x): x is string => !!x), failed };
     }
 }

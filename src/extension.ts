@@ -6,10 +6,13 @@ import { SemaSidebarProvider } from './core/semaSidebarProvider';
 import { pet } from './pet/pet-client';
 import { SystemConfigManager } from './managers/SystemConfigManager';
 import { SkillCatalogManager } from './managers/SkillCatalogManager';
+import { BrowserControlManager } from './managers/BrowserControlManager';
 import { t } from './webview/common/i18n/core';
 
 /** globalState 键：已处理过的默认安装 skill id（用户卸载后不再重装） */
 const DEFAULT_SKILLS_INSTALLED_KEY = 'sema.defaultSkillsInstalled';
+/** globalState 键：上次完成内置资源升级同步的扩展版本 */
+const BUILTIN_RESOURCES_VERSION_KEY = 'sema.builtinResourcesVersion';
 
 // 保存 sidebarProvider 实例以便在 deactivate 时使用
 let sidebarProvider: SemaSidebarProvider;
@@ -23,14 +26,10 @@ export function activate(context: vscode.ExtensionContext) {
     // 检查并设置默认工作区
     checkAndSetDefaultWorkspace();
 
-    // 内置资源里标记 defaultInstall 的 skill 首次激活时装到用户级；异步不阻塞启动，失败只打日志下次重试
-    const handled = context.globalState.get<string[]>(DEFAULT_SKILLS_INSTALLED_KEY, []);
-    void new SkillCatalogManager(path.join(context.extensionPath, 'resources'))
-        .installDefaultSkills(handled)
-        .then(ids => { if (ids.length) return context.globalState.update(DEFAULT_SKILLS_INSTALLED_KEY, [...new Set([...handled, ...ids])]); })
-        .then(undefined, err => console.error('[skill-catalog] default install failed:', err));
-
     sidebarProvider = new SemaSidebarProvider(context);
+
+    // 内置资源同步（默认安装 + 升级覆盖）；异步不阻塞启动，失败只打日志下次激活重试
+    void syncBuiltinResources(context).catch(err => console.error('[skill-catalog] builtin resources sync failed:', err));
 
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
@@ -105,6 +104,28 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 桌宠：开关由「系统配置 → 基础设置 → 启用桌宠」控制，默认关闭
     if (sidebarProvider.isPetEnabled()) void sidebarProvider.startPet();
+}
+
+/**
+ * 内置资源同步（对齐 sema-core webui router 的启动同步）：
+ *   - 默认安装：resources/skills 里标 defaultInstall 的 skill 首次激活装到用户级，处理过的 id 记入 globalState，用户卸载后不再重装
+ *   - 升级后首次激活（globalState 记的版本 ≠ 当前扩展版本）：用户级已有的默认 skill、已开启的浏览器控制 skill/MCP 一律按安装包覆盖，
+ *     全部成功才记下当前版本；同一版本内后续激活只比一次字符串，不再碰用户级目录
+ */
+async function syncBuiltinResources(context: vscode.ExtensionContext): Promise<void> {
+    const version = String(context.extension.packageJSON?.version || '');
+    const upgraded = context.globalState.get<string>(BUILTIN_RESOURCES_VERSION_KEY) !== version;
+    const handled = context.globalState.get<string[]>(DEFAULT_SKILLS_INSTALLED_KEY, []);
+    const r = await new SkillCatalogManager(path.join(context.extensionPath, 'resources')).syncDefaultSkills(handled, upgraded);
+    if (r.handled.length) await context.globalState.update(DEFAULT_SKILLS_INSTALLED_KEY, [...new Set([...handled, ...r.handled])]);
+    if (!upgraded) return;
+    const coreManager = sidebarProvider.getProcessWrapper();
+    let browserOk = true;
+    if ((coreManager.getSystemConfig() as Record<string, any>)?.enableBrowserControl) {
+        browserOk = await new BrowserControlManager(coreManager, context.extensionPath).syncInstalled()
+            .then(() => true, err => { console.error('[browser-control] upgrade sync failed:', err); return false; });
+    }
+    if (!r.failed && browserOk) await context.globalState.update(BUILTIN_RESOURCES_VERSION_KEY, version);
 }
 
 /**

@@ -9,6 +9,8 @@ import { buildPasteInput, type PasteAttachment } from '../../common/paste';
 
 /** 同时打开的会话上限（对齐 semaProcessWrapper.MAX_SESSIONS = 5，本地常量避免拽入 node 依赖）。 */
 const MAX_SESSIONS = 5;
+/** 浏览器控制的用户级 chrome MCP 名（对齐 config-controller / Kotlin BuiltinResourcesSync）。 */
+const BROWSER_MCP_NAME = 'chrome';
 
 // @file 引用格式化（1:1 复刻 chatWebview 的本地实现，helper 未导出故此处重写）。
 const FILE_REFERENCE_QUOTE_REGEX = /[\s。，、；：！？""''「」『』（）《》〈〉【】,;!?]/;
@@ -147,6 +149,7 @@ export class Controller {
         switch (msg.type) {
             case 'frontendReady':
                 await this.ensureInit();
+                void this.syncBuiltinResources();
                 await this.postEnvInfo();
                 await this.createSession({ agentMode: msg.mode, permissionLevel: msg.permissionLevel });
                 break;
@@ -243,6 +246,27 @@ export class Controller {
                 platform: r?.sep === '\\' ? 'win32' : 'posix',
             });
         } catch { /* ignore */ }
+    }
+
+    /**
+     * 升级后首次打开的浏览器控制同步（对齐 VSCode extension.syncBuiltinResources 的浏览器控制部分）：
+     * 默认 skill 的覆盖在 Kotlin 侧工具窗口创建时已做；chrome MCP 要经 core 重新 add（添加即更新）才能更新，所以放在 core 就绪后：
+     * Kotlin 判定需要同步并重拷 chrome-use 目录 → 这里刷新 skills、用户级有 chrome MCP 就按模板重写 → 回报 markSynced 落版本号。
+     * 失败只打日志，下次打开重试；多窗口各自调用也幂等。
+     */
+    private async syncBuiltinResources(): Promise<void> {
+        try {
+            const r = await this.t.callEditor('browserControl', { op: 'syncUpgrade' });
+            if (!r?.sync) return;
+            await this.core.getSkillsInfo(true);
+            const servers: any[] = await this.core.getMCPServerInfo();
+            if ((servers ?? []).some(s => s?.config?.name === BROWSER_MCP_NAME && (s?.scope ?? s?.config?.scope) === 'user')) {
+                await this.core.addMCPServer({ ...r.mcp, name: BROWSER_MCP_NAME, scope: 'user' });
+            }
+            await this.t.callEditor('browserControl', { op: 'markSynced' });
+        } catch (e) {
+            console.warn('[sema] builtin resources upgrade sync failed:', e);
+        }
     }
 
     private async ensureInit(): Promise<void> {
