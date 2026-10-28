@@ -28,6 +28,7 @@ import { PREVIEW_MODE, getPreviewMessages, mockDialogMap, isPreviewActive } from
 import { groupMessages, getToolName, getToolTitle } from './utils/groupMessages';
 import { setPathEnv } from './utils/pathDisplay';
 import VizEmbed from './blocks/VizEmbed';
+import TurnNav, { turnNavItems, MIN_TURNS } from './components/TurnNav';
 import { isAttachmentPath, isVizPath } from '../common/viz';
 import { TOOL_NAME_RUN_SHELL, TOOL_NAME_WRITE_FILE, TOOL_NAME_PATCH_FILE } from '../../utils/tool';
 import { TASK_TYPE_SHELL, TASK_TYPE_AGENT } from '../config/BackgroundTaskConfig';
@@ -982,8 +983,10 @@ const ChatSession: React.FC<ChatSessionProps> = ({ vscode: rawVscode, sessionId,
         }
 
         // 非最后一轮后面已有下一轮的用户输入，轮末的终端命令数量不会再变，可以折叠成组
+        // data-turn：左缘轮次指示条按它定位与计算当前轮（以用户输入开头的轮次才编号，与 turnNavItems 的条目一一对应）
+        let navIdx = -1;
         return groups.map((group, gi) => (
-            <div key={group.key} className="turn-group">
+            <div key={group.key} className="turn-group" data-turn={group.items[0]?.message.type === 'user' ? ++navIdx : undefined}>
                 {groupMessages(group.items.map(item => item.message), { streamingToolId, showThinkingText: shouldShowThinkingText, tailClosed: gi < groups.length - 1 }).map((item) => {
                     if (item.kind === 'group') {
                         const groupStartIndex = group.items[item.originalStartIndex].index;
@@ -1054,6 +1057,12 @@ const ChatSession: React.FC<ChatSessionProps> = ({ vscode: rawVscode, sessionId,
             </div>
         ));
     }, [messages, modelName, availableModels, activeDialog, processingState, streamingAssistantId, streamingToolId, openAgentTaskId, agentMode, thinkingEnabled, showThinkingText, handleFork, handleBranch, pendingInputs]);
+
+    // 左缘轮次指示条的条目：输入轮数够多时才显示（预览模式的假消息不算）
+    const navItems = useMemo(
+        () => (messages && messages.length ? turnNavItems(messages, processingState === 'processing') : []),
+        [messages, processingState],
+    );
 
     return (
         <SessionContext.Provider value={sessionId}>
@@ -1178,6 +1187,8 @@ const ChatSession: React.FC<ChatSessionProps> = ({ vscode: rawVscode, sessionId,
                     {PREVIEW_MODE && <PreviewDialogs vscode={vscode} />}
                 </div>
                 </div>
+                {/* 左缘轮次指示条：悬停单条短横线弹出该轮小面板，点击跳到该轮用户输入 */}
+                {navItems.length >= MIN_TURNS && <TurnNav containerRef={outputContainerRef} items={navItems} />}
                 {/* 回到底部：内容超出一屏且离底时悬浮显示；运行中换成三点动画表示仍在生成 */}
                 {overflow && !stick && (
                     <button

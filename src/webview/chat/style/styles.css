@@ -156,6 +156,91 @@ code, pre, .code {
     color: var(--vscode-foreground);
 }
 
+/* 左缘轮次指示条：一条短横线对应一轮输入，垂直居中；z-index 压过吸顶的用户输入（2）与回到底部按钮（5） */
+.turn-nav {
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 6;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    /* 滚动区左侧只有 12px 内边距，短横线最宽 11px 靠左 2px 放，不压正文 */
+    padding: 6px 0 6px 2px;
+}
+
+/* 每条短横线的可点区域铺满整行（行高 7px = 线 2px + 间距 5px，整列无死区） */
+.turn-nav-tick {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: 12px;
+    height: 7px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+}
+
+.turn-nav-bar {
+    display: block;
+    width: 7px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--chat-text-secondary);
+    opacity: 0.45;
+}
+
+.turn-nav-bar.current {
+    width: 11px;
+    background: var(--chat-text-primary);
+    opacity: 1;
+}
+
+/* 悬停短横线弹出的小面板：挂在短横线右侧、垂直居中；不接鼠标事件，免得挡住相邻短横线的悬停 */
+.turn-nav-tip {
+    position: absolute;
+    left: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: max-content;
+    max-width: 240px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    padding: 5px 8px;
+    border-radius: var(--chat-radius-md);
+    border: 1px solid var(--chat-tooltip-border);
+    background: var(--chat-tooltip-bg);
+    color: var(--chat-tooltip-fg);
+    box-shadow: var(--chat-shadow);
+    text-align: left;
+    line-height: 1.4;
+    pointer-events: none;
+}
+
+.turn-nav-tip-title {
+    width: 100%;
+    font-size: var(--chat-font-base);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.turn-nav-tip-conclusion {
+    width: 100%;
+    font-size: var(--chat-font-xs);
+    color: var(--chat-text-secondary);
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+
 /* 运行中的三点动画 */
 .run-dots {
     display: inline-flex;
